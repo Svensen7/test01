@@ -1,0 +1,159 @@
+"""
+โปรแกรมจัดตารางออกกำลังกาย ด้วย A* Algorithm (เวอร์ชันสำหรับผู้เริ่มต้น)
+
+Start state : เผาผลาญแล้ว 0 kcal, ความเหนื่อย 0
+Goal state  : เผาผลาญครบตามน้ำหนักที่อยากลด (1 กก. = 7,700 kcal)
+
+f(n) = g(n) + h(n)
+  g(n) = เวลาที่ใช้ + ความเหนื่อยสะสม + เวลาพักฟื้น   (ต้นทุนที่จ่ายไปแล้ว)
+  h(n) = น้ำหนักที่ยังขาด x ต้นทุนต่อ 1 กก. ที่ถูกที่สุด (ต้นทุนที่คาดว่าจะต้องจ่ายอีก)
+"""
+import heapq
+
+# ---------- 1) ค่าคงที่ ----------
+KCAL_PER_KG = 7700      # พลังงาน 1 กก. ของไขมัน
+FATIGUE_COST = 5        # ความเหนื่อย 1 หน่วย = 5 นาที
+MAX_FATIGUE = 8         # ความเหนื่อยสูงสุดที่รับได้
+REST_RECOVER = 3        # พัก 1 วัน ลดความเหนื่อย 3 หน่วย
+REST_TIME = 30          # ต้นทุนของการพัก (นาที)
+REPEAT_PENALTY = 25     # โทษถ้าทำท่าซ้ำกับ 2 วันล่าสุด (เพื่อให้ตารางหลากหลาย)
+DAYS = ["จันทร์", "อังคาร", "พุธ", "พฤหัสฯ", "ศุกร์", "เสาร์", "อาทิตย์"]
+
+# ---------- 2) รายการท่าออกกำลังกาย (12 ท่า) ----------
+# met = ความหนักของท่า, time = นาที, tired = ความเหนื่อยที่เพิ่ม, recover = เวลาพักฟื้น (นาที)
+EXERCISES = [
+    {"name": "เดินเร็ว",       "met": 4.3,  "time": 45, "tired": 1, "recover": 0,  "impact": False},
+    {"name": "โยคะ",           "met": 2.5,  "time": 45, "tired": 1, "recover": 0,  "impact": False},
+    {"name": "พิลาทิส",        "met": 3.5,  "time": 40, "tired": 1, "recover": 0,  "impact": False},
+    {"name": "ปั่นจักรยาน",    "met": 6.8,  "time": 40, "tired": 2, "recover": 10, "impact": False},
+    {"name": "ว่ายน้ำ",        "met": 7.0,  "time": 40, "tired": 3, "recover": 15, "impact": False},
+    {"name": "เต้นแอโรบิก",    "met": 6.5,  "time": 40, "tired": 2, "recover": 10, "impact": False},
+    {"name": "ยกน้ำหนัก",      "met": 5.0,  "time": 40, "tired": 2, "recover": 15, "impact": False},
+    {"name": "วิดพื้น/สควอต",  "met": 5.5,  "time": 30, "tired": 2, "recover": 10, "impact": False},
+    {"name": "วิ่งเหยาะ",      "met": 8.0,  "time": 30, "tired": 3, "recover": 15, "impact": True},
+    {"name": "HIIT",           "met": 10.0, "time": 20, "tired": 4, "recover": 30, "impact": True},
+    {"name": "กระโดดเชือก",    "met": 11.0, "time": 15, "tired": 4, "recover": 20, "impact": True},
+    {"name": "วิ่งขึ้นบันได",  "met": 8.0,  "time": 20, "tired": 3, "recover": 10, "impact": True},
+]
+
+
+# ---------- 3) ฟังก์ชันช่วยคำนวณ ----------
+def calories(ex, weight):
+    """แคลอรีที่เผาผลาญ = MET x น้ำหนัก x ชั่วโมง"""
+    return ex["met"] * weight * ex["time"] / 60
+
+
+def cost_of(ex):
+    """ต้นทุนของท่า = เวลา + ความเหนื่อย + เวลาพักฟื้น (ส่วนของ g)"""
+    return ex["time"] + ex["tired"] * FATIGUE_COST + ex["recover"]
+
+
+def heuristic(kcal_burned, goal_kcal, cheapest_cost_per_kcal):
+    """h(n) = ประมาณต้นทุนที่ยังต้องจ่ายเพื่อเผาผลาญส่วนที่ขาด"""
+    remaining = max(0, goal_kcal - kcal_burned)
+    return remaining * cheapest_cost_per_kcal
+
+
+# ---------- 4) A* Algorithm ----------
+def a_star(weight, target_kg, exercises, max_fatigue):
+    goal_kcal = target_kg * KCAL_PER_KG
+
+    # หาท่าที่ "ถูกที่สุดต่อ 1 kcal" เอาไว้ใช้ทำ h(n)
+    cheapest = min(cost_of(e) / calories(e, weight) for e in exercises)
+
+    # state = (kcal ที่เผาแล้ว, ความเหนื่อย, ท่า 2 วันล่าสุด)
+    start = (0, 0, ())
+
+    # open_list เก็บ (f, g, state, path) และ heapq จะดึงค่า f ต่ำสุดออกมาก่อนเสมอ
+    open_list = [(heuristic(0, goal_kcal, cheapest), 0, start, [])]
+    best_g = {}   # จำ g ที่ดีที่สุดของแต่ละ state จะได้ไม่คำนวณซ้ำ
+
+    while open_list:
+        f, g, state, path = heapq.heappop(open_list)
+        kcal_burned, fatigue, recent = state
+
+        # ตรวจ goal state
+        if kcal_burned >= goal_kcal:
+            return path, g
+
+        # สร้าง "ตัวเลือกถัดไป" ทั้งหมดจาก state นี้
+        # (ชื่อท่า, kcal ที่ได้, ความเหนื่อยใหม่, ต้นทุน, นาที, recent ใหม่)
+        choices = []
+        for ex in exercises:
+            if fatigue + ex["tired"] > max_fatigue:
+                continue   # เหนื่อยเกิน ทำท่านี้ไม่ได้
+            cost = cost_of(ex)
+            if ex["name"] in recent:
+                cost += REPEAT_PENALTY   # ทำซ้ำ -> โดนโทษ
+            new_recent = (recent + (ex["name"],))[-2:]
+            choices.append((ex["name"], calories(ex, weight), fatigue + ex["tired"],
+                            cost, ex["time"], new_recent))
+
+        if fatigue > 0:   # ถ้าเหนื่อยอยู่ เลือกพักได้
+            choices.append(("พักผ่อน", 0, max(0, fatigue - REST_RECOVER),
+                            REST_TIME, 0, recent))
+
+        # ใส่ตัวเลือกลงใน open_list
+        for name, kcal, new_fatigue, cost, minutes, new_recent in choices:
+            new_g = g + cost
+            new_kcal = kcal_burned + kcal
+            # ปัด kcal เป็นช่วงละ 100 เพื่อให้ state ไม่เยอะเกินไป
+            key = (round(new_kcal / 100), new_fatigue, new_recent)
+
+            if key in best_g and best_g[key] <= new_g:
+                continue   # เคยมีทางที่ดีกว่าหรือเท่ากันแล้ว ข้าม
+            best_g[key] = new_g
+
+            new_f = new_g + heuristic(new_kcal, goal_kcal, cheapest)
+            new_state = (new_kcal, new_fatigue, new_recent)
+            new_path = path + [(name, minutes, kcal)]
+            heapq.heappush(open_list, (new_f, new_g, new_state, new_path))
+
+    return None, None   # หาไม่เจอ
+
+
+# ---------- 5) ส่วนแสดงผล ----------
+def show_plan(path, total_cost):
+    weeks = (len(path) + 6) // 7   # จำนวนสัปดาห์ (ปัดขึ้น)
+    for w in range(weeks):
+        week = path[w * 7: w * 7 + 7]
+        print(f"\n--- สัปดาห์ที่ {w + 1} ---")
+        week_kcal = 0
+        for day, (name, minutes, kcal) in enumerate(week):
+            if minutes > 0:
+                print(f"  {DAYS[day]:<8}: {name:<16} {minutes} นาที (~{kcal:.0f} kcal)")
+            else:
+                print(f"  {DAYS[day]:<8}: {name}")
+            week_kcal += kcal
+        print(f"  รวม {week_kcal:.0f} kcal (~{week_kcal / KCAL_PER_KG:.2f} กก.)")
+    print(f"\nใช้เวลาทั้งหมด {len(path)} วัน | f(n) = {total_cost:.0f} นาทีเทียบเท่า")
+
+
+# ---------- 6) โปรแกรมหลัก ----------
+def main():
+    height = float(input("ส่วนสูง (ซม.): "))
+    weight = float(input("น้ำหนักปัจจุบัน (กก.): "))
+    target = float(input("น้ำหนักที่อยากลด (กก.): "))
+
+    # ใช้ BMI ประเมินสภาพร่างกาย (Start state)
+    bmi = weight / ((height / 100) ** 2)
+    print(f"\nBMI = {bmi:.1f}")
+
+    exercises = EXERCISES
+    max_fatigue = MAX_FATIGUE
+    if bmi >= 30:
+        # BMI สูง -> ตัดท่าที่กระแทกเข่า/ข้อ และลดขีดความเหนื่อย
+        exercises = [e for e in EXERCISES if not e["impact"]]
+        max_fatigue = 6
+        print("BMI สูง: เลือกเฉพาะท่าแรงกระแทกต่ำ")
+    elif bmi < 18.5:
+        print("คำเตือน: น้ำหนักต่ำกว่าเกณฑ์ ควรปรึกษาแพทย์ก่อน")
+
+    path, total_cost = a_star(weight, target, exercises, max_fatigue)
+    if path is None:
+        print("ไม่พบแผนที่เหมาะสม")
+    else:
+        show_plan(path, total_cost)
+
+
+main()
